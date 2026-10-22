@@ -1,14 +1,27 @@
-# DSH WorkBuddy Connect
+# DSH WorkBuddy Connect (fork with upstream rate limiting)
 
 English | [中文](./README.md)
 
-## Maintenance discontinued
+> **This is a fork.** The upstream [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) has been discontinued. This repository adds **upstream request rate limiting** on top of it (see [Rate limiting](#rate-limiting-new-in-this-fork)); every other feature matches upstream 0.7.9.
+>
+> The upstream discontinuation notice is kept verbatim below. Its judgement is about the original project; this fork documents only its own changes and does not restate that judgement.
+
+## Upstream discontinuation notice (verbatim)
 
 Starting October 20, 2026, WorkBuddy began restricting requests from unofficial clients. From a technical perspective, this kind of check is not difficult to get past. However, the model credits come with restrictions on where they can be used. WorkBuddy has made clear that it wants to distinguish its official client from third-party access, and this project respects that boundary and will not continue adapting to these checks. Using the official WorkBuddy client is, of course, the safest option.
 
 Due to limited personal time and energy, this project is no longer maintained, effective immediately. New feature requests and PRs will no longer be handled, and updates, compatibility fixes, and issue support will no longer be provided. The project repository is scheduled to go offline on **October 22, 2026 (Beijing time)**.
 
 Many thanks to everyone who used the plugin, shared feedback, and contributed, especially those who helped test, investigate problems, and submit PRs. It has been a pleasure to see this little plugin make things easier for you!
+
+## What this fork changes
+
+| Change | Detail |
+|---|---|
+| Upstream request rate limiting | Minimum request spacing + concurrency cap + adaptive cooldown, tunable through one hot-reloading JSON file — see [Rate limiting](#rate-limiting-new-in-this-fork) |
+| Tests | Adds `tests/rate-gate.spec.ts` and `tests/rate-limit-config.spec.ts`, 15 cases total |
+
+The changes live in `src/rate-gate.ts` (new), `src/rate-limit-config.ts` (new), plus the wiring in `src/shim.ts` and `src/index.ts`.
 
 ---
 
@@ -120,6 +133,54 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 ```
 
 `logout` removes only that version's plugin-owned credential copy. It leaves the desktop app's own sign-in alone and does not promise the model group will disappear (the app's credential file still supplies one).
+
+## Rate limiting (new in this fork)
+
+Most upstream 429s are not "your account is being throttled" — they are `模型繁忙，请换模型或稍后重试` ("model busy, switch models or retry later"), the upstream's compute queue. That is unrelated to your account, so **another account does not help, and retrying harder makes it worse**: DSH retries a busy upstream five times inside ~15.5 s by default, turning one rejection into six.
+
+This fork puts a gate on the shim's single upstream choke point, with three independent controls:
+
+| Control | Default | Effect |
+|---|---|---|
+| `minIntervalMs` | 1200 | Minimum gap between upstream request **starts**, plus random jitter |
+| `maxConcurrent` | 2 | How many upstream streams may be open at once; subagent fan-out is the burst source |
+| Adaptive cooldown | 5 s, doubling, 120 s ceiling | Backs off when the upstream reports busy; any success clears it |
+
+### Editing it: one JSON file
+
+Generated on first start and **never overwritten afterwards** (an upgrade will not lose it):
+
+```
+~/.dsh/.workbuddy-rate-limit.json
+```
+
+```json
+{
+  "enabled": true,
+  "minIntervalMs": 1200,
+  "jitterMs": 400,
+  "maxConcurrent": 2,
+  "cooldownBaseMs": 5000,
+  "cooldownMaxMs": 120000
+}
+```
+
+- **Save and it applies to the next request — no DSH restart.** The file is re-read only when its mtime or size changes.
+- `enabled: false` turns throttling off, also immediately.
+- Keys starting with `//` are documentation and are ignored (JSON has no comments, so they are spelled as inert keys).
+- **A bad edit cannot break anything**: invalid JSON, a number written as a string, or a negative value each fall back to the default **per field**, with one warning. A typo can neither silently disable throttling nor take the provider down.
+
+Common tweaks: too slow → `minIntervalMs: 800`; still hitting busy → `maxConcurrent: 1`; want it off for a while → `enabled: false`.
+
+### Environment variables (optional)
+
+Without a config file, the same knobs are available as `DSH_WORKBUDDY_MIN_INTERVAL_MS`, `DSH_WORKBUDDY_RATE_JITTER_MS`, `DSH_WORKBUDDY_MAX_CONCURRENT`, `DSH_WORKBUDDY_COOLDOWN_BASE_MS`, `DSH_WORKBUDDY_COOLDOWN_MAX_MS`, and `DSH_WORKBUDDY_RATE_LIMIT=0` to disable the gate outright.
+
+Precedence: **config file > environment variables > built-in defaults**. When the file exists it is the only source.
+
+### How this relates to retry policy
+
+They solve different halves: rate limiting **avoids** the wall, retry policy **recovers** after hitting it. They do not conflict and can be configured together.
 
 ## Configuration
 

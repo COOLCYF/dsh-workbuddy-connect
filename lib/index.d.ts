@@ -1363,6 +1363,7 @@ declare class WorkBuddyProbeStore {
 interface ShimLogger {
   warn(...args: unknown[]): void;
   error(...args: unknown[]): void;
+  info?(...args: unknown[]): void;
 }
 /** What the plugin needs from a running shim. */
 interface WorkBuddyShim {
@@ -1377,6 +1378,21 @@ interface WorkBuddyShim {
    * resolves the real credential itself via the store.
    */
   token(): string;
+  /**
+   * Live rate-gate state plus the config path the user edits, for diagnostics.
+   * `enabled` reflects the file as it is right now, not as it was at startup.
+   */
+  rateLimitState(): {
+    minIntervalMs: number;
+    jitterMs: number;
+    maxConcurrent: number;
+    active: number;
+    queued: number;
+    penaltyMs: number;
+    cooldownUntil: number;
+    configPath: string;
+    enabled: boolean;
+  };
   /** Stop serving and destroy open connections. */
   close(): Promise<void>;
 }
@@ -1386,6 +1402,8 @@ interface WorkBuddyShimOptions {
   client: Pick<WorkBuddyUpstreamClient, 'chatStream'>;
   catalog: WorkBuddyCatalog;
   logger?: ShimLogger;
+  /** Override the config document's path; defaults to the Harness home. */
+  rateLimitPath?: string;
 }
 /**
  * Start the loopback endpoint. Requests carry any bearer; the loopback bind
@@ -1460,6 +1478,166 @@ interface WorkBuddyAdapter {
  * `modelErrors` since 0.1.5-alpha.2 (#12).
  */
 declare function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBuddyAdapter;
+//#endregion
+//#region src/rate-gate.d.ts
+/**
+ * Upstream request gate: minimum spacing, bounded concurrency, and an adaptive
+ * cooldown that reacts to the upstream reporting it is busy.
+ *
+ * ## Why this exists
+ *
+ * Measured on a real machine over 2026-10-18..22 (23962 session-log lines,
+ * 784 upstream 429s): 96.6% of them were `模型繁忙` — the upstream's compute
+ * queue, not the account's quota — and they arrived in bursts, with up to 183
+ * model calls in a single ten-minute window, i.e. one every ~3.3 s with no
+ * spacing at all. The official desktop client sends a small fraction of that
+ * rate, which is why it does not see them. The host's default retry policy
+ * then retries a busy upstream five times inside ~15.5 s, turning one rejection
+ * into six.
+ *
+ * A busy upstream is not a per-account quota problem, so a multi-account pool
+ * cannot fix it and retrying harder makes it worse. The only lever that helps
+ * is to stop generating the burst.
+ *
+ * ## Three independent controls
+ *
+ * - `minIntervalMs` — minimum gap between two upstream request *starts*, plus
+ *   random jitter so the cadence is not a fixed beat.
+ * - `maxConcurrent` — how many upstream streams may be open at once. Subagent
+ *   fan-out is what produces the burst, so this is the load-bearing bound.
+ * - adaptive cooldown — every `soft_rate` doubles the next penalty (capped at
+ *   `cooldownMaxMs`), and any success clears it. A busy upstream therefore
+ *   slows this client down instead of being hammered.
+ *
+ * ## Where the settings come from
+ *
+ * The settings are read through an injected getter rather than captured once at
+ * construction, so the editable config file can hot-reload: a saved edit
+ * applies to the very next request with no restart. `current()` returning
+ * `undefined` means "disabled right now", which is how `enabled: false` takes
+ * effect mid-session.
+ *
+ * @module dsh-workbuddy-connect/rate-gate
+ */
+/** One resolved set of gate settings. */
+interface RateLimitSettings {
+  /** Minimum gap between two upstream request starts, in milliseconds. */
+  minIntervalMs: number;
+  /** Upper bound on the random extra delay added to `minIntervalMs`. */
+  jitterMs: number;
+  /** Maximum number of upstream streams open at the same time. */
+  maxConcurrent: number;
+  /** First cooldown applied when the upstream reports it is busy. */
+  cooldownBaseMs: number;
+  /** Ceiling for the doubling cooldown. */
+  cooldownMaxMs: number;
+}
+/** The config file's on-disk shape; `enabled: false` turns the gate off. */
+interface RateLimitConfig extends RateLimitSettings {
+  enabled?: boolean;
+}
+/** A settings source that may change between requests. */
+type RateLimitSource = () => RateLimitSettings | undefined;
+/** The gate's public surface. */
+interface UpstreamGate {
+  /** Run one upstream request under the spacing and concurrency rules. */
+  run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T>;
+  /** The upstream said it is busy: widen the next cooldown, capped. */
+  noteRateLimited(): number;
+  /** A request completed: drop any accumulated penalty. */
+  noteSuccess(): void;
+  /** Current gate state, for diagnostics. */
+  state(): {
+    minIntervalMs: number;
+    jitterMs: number;
+    maxConcurrent: number;
+    active: number;
+    queued: number;
+    penaltyMs: number;
+    cooldownUntil: number;
+  };
+}
+/** Minimal logger surface the plugin context already provides. */
+interface GateLogger {
+  warn(...args: unknown[]): void;
+  info?(...args: unknown[]): void;
+}
+/** What the gate needs to run. */
+interface UpstreamGateOptions {
+  /** Live settings; re-read on every scheduling decision. */
+  current: RateLimitSource;
+  /**
+   * Optional logger. Declared `| undefined` because the shim passes its own
+   * optional logger straight through, and `exactOptionalPropertyTypes` treats
+   * "absent" and "present but undefined" as different types.
+   */
+  logger?: GateLogger | undefined;
+}
+/**
+ * Build the gate. One instance per shim (i.e. per variant), because the two
+ * variants talk to different upstream endpoints and must not share a budget.
+ *
+ * The gate never swallows work: a request either runs, or rejects when its
+ * caller aborts. It holds no timer after the last request finishes, so it
+ * cannot keep the process alive.
+ */
+declare function createUpstreamGate(options: UpstreamGateOptions): UpstreamGate;
+//#endregion
+//#region src/rate-limit-config.d.ts
+/** Basename of the editable rate-limit config inside the Harness home. */
+declare const RATE_LIMIT_CONFIG_FILENAME = ".workbuddy-rate-limit.json";
+/** Minimal logger surface the plugin context already provides. */
+interface ConfigLogger {
+  warn(...args: unknown[]): void;
+  info?(...args: unknown[]): void;
+}
+/** What the reader needs. */
+interface RateLimitReaderOptions {
+  /** Config document path; defaults to the Harness home. */
+  path?: string | undefined;
+  /**
+   * Optional logger. Declared `| undefined` because the shim passes its own
+   * optional logger straight through, and `exactOptionalPropertyTypes` treats
+   * "absent" and "present but undefined" as different types.
+   */
+  logger?: ConfigLogger | undefined;
+}
+/** The reader's public surface. */
+interface RateLimitReader {
+  /** The path the user edits, for diagnostics and the settings card. */
+  path: string;
+  /**
+   * The effective settings, or `undefined` when the gate is disabled right now.
+   * Re-reads the file when it changed, so callers may invoke this per request.
+   */
+  current(): RateLimitSettings | undefined;
+}
+/** The compiled-in defaults, shared with the file seeder. */
+declare function defaultRateLimitConfig(): Required<RateLimitConfig>;
+/** The config document's path inside the Harness home. */
+declare function workbuddyRateLimitPath(): string;
+/**
+ * The environment-variable path, used only when no config file exists.
+ *
+ * `DSH_WORKBUDDY_RATE_LIMIT=0` disables the gate outright; otherwise each knob
+ * has its own override so an existing deployment keeps working unchanged.
+ */
+declare function rateLimitFromEnv(): RateLimitSettings | undefined;
+/**
+ * Build the reader. The parsed document is cached against its mtime+size, so
+ * the steady-state cost of a request is one `stat`, not a parse.
+ */
+declare function createRateLimitReader(options?: RateLimitReaderOptions): RateLimitReader;
+/**
+ * Write the default document when none exists, so there is something to edit.
+ *
+ * Seeded once, never overwritten: a user's tuned values must survive restarts.
+ * The `//`-prefixed keys are documentation — JSON has no comments, and the
+ * reader ignores unknown keys, so they are inert.
+ *
+ * @returns whether a file was written.
+ */
+declare function seedRateLimitConfig(path: string): boolean;
 //#endregion
 //#region src/catalog-store.d.ts
 /** Basename of the CN variant's saved catalog inside the Harness home. */
@@ -1801,4 +1979,4 @@ declare function visibilityAccountOf(credential: Pick<WorkBuddyCredential, 'uid'
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { AI_VARIANT, type AppVersionInfo, CN_APP_VERSION_FILENAME, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, type ResolveChatIdentityOptions, type UpstreamErrorKind, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_PROBE_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyProbeRecord, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyProbeValidation, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, chatUserAgent, classifyUpstreamError, clearHostHeartbeat, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, desktopAuthCandidatesFor, fallbackChatIdentity, fingerprintModel, inject, installedAppVersion, isHeartbeatProcessAlive, modelWithCurrentPromotion, name, normalizeCredits, parseModelCatalog, parseWorkBuddyAuth, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, probeModel, processStartTimeMs, randomSentinel, readBundleVersion, readCliVersion, readHostHeartbeat, regionOf, resolveAppVersion, resolveChatIdentity, validAppVersion, validCliVersion, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyProbePath, workbuddyVisibilityPath };
+export { AI_VARIANT, type AppVersionInfo, CN_APP_VERSION_FILENAME, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, RATE_LIMIT_CONFIG_FILENAME, type RateLimitReader, type RateLimitSettings, type ResolveChatIdentityOptions, type UpstreamErrorKind, type UpstreamGate, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_PROBE_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyProbeRecord, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyProbeValidation, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, chatUserAgent, classifyUpstreamError, clearHostHeartbeat, createRateLimitReader, createUpstreamGate, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, defaultRateLimitConfig, desktopAuthCandidatesFor, fallbackChatIdentity, fingerprintModel, inject, installedAppVersion, isHeartbeatProcessAlive, modelWithCurrentPromotion, name, normalizeCredits, parseModelCatalog, parseWorkBuddyAuth, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, probeModel, processStartTimeMs, randomSentinel, rateLimitFromEnv, readBundleVersion, readCliVersion, readHostHeartbeat, regionOf, resolveAppVersion, resolveChatIdentity, seedRateLimitConfig, validAppVersion, validCliVersion, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyProbePath, workbuddyRateLimitPath, workbuddyVisibilityPath };

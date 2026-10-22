@@ -21,12 +21,15 @@ import { Readable } from 'node:stream'
 import type { WorkBuddyCredentialStore } from './auth.ts'
 import type { WorkBuddyCatalog } from './catalog.ts'
 import { bindToUsablePort, hostIsLoopback, originIsLoopback } from './loopback.ts'
+import { createRateLimitReader, workbuddyRateLimitPath, type RateLimitReader } from './rate-limit-config.ts'
+import { createUpstreamGate, type UpstreamGate } from './rate-gate.ts'
 import { extractDisplayErrorMessage, prepareChatBody, WorkBuddyUpstreamClient, type UpstreamErrorKind } from './upstream.ts'
 
 /** Minimal logger surface the plugin context already provides. */
 export interface ShimLogger {
   warn(...args: unknown[]): void
   error(...args: unknown[]): void
+  info?(...args: unknown[]): void
 }
 
 /** What the plugin needs from a running shim. */
@@ -42,6 +45,21 @@ export interface WorkBuddyShim {
    * resolves the real credential itself via the store.
    */
   token(): string
+  /**
+   * Live rate-gate state plus the config path the user edits, for diagnostics.
+   * `enabled` reflects the file as it is right now, not as it was at startup.
+   */
+  rateLimitState(): {
+    minIntervalMs: number
+    jitterMs: number
+    maxConcurrent: number
+    active: number
+    queued: number
+    penaltyMs: number
+    cooldownUntil: number
+    configPath: string
+    enabled: boolean
+  }
   /** Stop serving and destroy open connections. */
   close(): Promise<void>
 }
@@ -52,6 +70,8 @@ export interface WorkBuddyShimOptions {
   client: Pick<WorkBuddyUpstreamClient, 'chatStream'>
   catalog: WorkBuddyCatalog
   logger?: ShimLogger
+  /** Override the config document's path; defaults to the Harness home. */
+  rateLimitPath?: string
 }
 
 const REQUEST_BODY_LIMIT = 64 * 1024 * 1024
@@ -114,6 +134,24 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
   // The shim never forwards it upstream — the real credential comes from the
   // store. A local attacker who can hit the port still cannot forge this.
   const SHARED_SECRET = randomBytes(32).toString('base64url')
+
+  // The upstream request gate. Every upstream chat request passes through this
+  // single choke point, so the spacing and concurrency bounds apply to the
+  // adapter, the probe service, and any future caller without each of them
+  // knowing the gate exists.
+  //
+  // The gate reads its settings through `reader.current()` on every scheduling
+  // decision rather than capturing them here, which is what makes the editable
+  // config file hot-reload: a saved edit applies to the next request, and
+  // `enabled: false` disables throttling mid-session with no restart.
+  const rateLimitReader: RateLimitReader = createRateLimitReader({
+    path: options.rateLimitPath ?? workbuddyRateLimitPath(),
+    logger,
+  })
+  const gate: UpstreamGate = createUpstreamGate({
+    current: () => rateLimitReader.current(),
+    logger,
+  })
 
   /** Constant-time bearer check; absent or mismatched bearers are rejected. */
   function bearerOk(req: IncomingMessage): boolean {
@@ -248,7 +286,26 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
 
     const raw = (await readBody(req)).toString('utf8')
     const prepared = prepareChatBody(raw)
-    const result = await client.chatStream(credential, prepared, controller.signal)
+    // The gate is always consulted rather than branched on: when the config says
+    // `enabled: false` its reader reports "no spacing, unlimited concurrency",
+    // so the disable rule lives in one place and applies without a restart.
+    //
+    // The two feedback hooks are what make the limits adaptive: a `soft_rate`
+    // widens the next cooldown, any other answer clears it. Both read the
+    // classified result rather than the HTTP status, because `soft_rate` is this
+    // plugin's own name for "the upstream is busy".
+    const result = await gate.run(async () => {
+      const outcome = await client.chatStream(credential, prepared, controller.signal)
+      if (outcome.ok) {
+        gate.noteSuccess()
+      } else if (outcome.kind === 'soft_rate') {
+        const penalty = gate.noteRateLimited()
+        if (penalty > 0) {
+          logger?.warn(`dsh-workbuddy-connect: upstream busy; pausing new requests for ${penalty}ms`)
+        }
+      }
+      return outcome
+    }, controller.signal)
 
     if (!result.ok) {
       const detail = extractDisplayErrorMessage(result.message) ?? result.message.slice(0, 400)
@@ -293,6 +350,11 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
     ready,
     baseUrl,
     token: () => SHARED_SECRET,
+    rateLimitState: () => ({
+      ...gate.state(),
+      configPath: rateLimitReader.path,
+      enabled: rateLimitReader.current() !== undefined,
+    }),
     close: () => new Promise<void>((resolve, reject) => {
       server.close(() => resolve())
       server.closeAllConnections()

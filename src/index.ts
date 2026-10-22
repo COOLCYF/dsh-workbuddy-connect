@@ -26,6 +26,7 @@ import { workbuddyCatalogPath, WorkBuddyCatalogStore } from './catalog-store.ts'
 import { WorkBuddyVisibilityStore, workbuddyVisibilityPath } from './visibility-store.ts'
 import { createWorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
+import { seedRateLimitConfig, workbuddyRateLimitPath } from './rate-limit-config.ts'
 import { WorkBuddyProbeService } from './probe-service.ts'
 import { newestFirst, WorkBuddyProbeStore, workbuddyProbePath } from './probe-store.ts'
 import { WorkBuddyUpstreamClient } from './upstream.ts'
@@ -43,6 +44,20 @@ import { CN_VARIANT, WORKBUDDY_VARIANTS, type WorkBuddyVariant } from './variant
 
 export { WORKBUDDY_PROVIDER, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, createWorkBuddyAdapter, type WorkBuddyAdapter } from './adapter.ts'
 export { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
+export {
+  createRateLimitReader,
+  defaultRateLimitConfig,
+  RATE_LIMIT_CONFIG_FILENAME,
+  rateLimitFromEnv,
+  seedRateLimitConfig,
+  workbuddyRateLimitPath,
+  type RateLimitReader,
+} from './rate-limit-config.ts'
+export {
+  createUpstreamGate,
+  type RateLimitSettings,
+  type UpstreamGate,
+} from './rate-gate.ts'
 export {
   FALLBACK_WORKBUDDY_AI_MODELS,
   FALLBACK_WORKBUDDY_MODELS,
@@ -584,7 +599,17 @@ function probeSection(runtime: VariantRuntime, consent: boolean): WorkBuddyWebPr
  */
 async function startVariant(ctx: Context, runtime: VariantRuntime): Promise<boolean> {
   const { variant, store, client, catalog, probeService } = runtime
-  const shim = createWorkBuddyShim({ store, client, catalog, logger: ctx.logger })
+
+  // Seed the editable rate-limit config before the first request, so the file
+  // the user is meant to edit exists from the first run instead of only after
+  // someone reads the docs. An existing file is never overwritten — a user's
+  // tuned values must survive restarts and upgrades.
+  const rateLimitPath = workbuddyRateLimitPath()
+  if (seedRateLimitConfig(rateLimitPath)) {
+    ctx.logger.info(`dsh-workbuddy-connect: wrote default rate-limit config to ${rateLimitPath}`)
+  }
+
+  const shim = createWorkBuddyShim({ store, client, catalog, rateLimitPath, logger: ctx.logger })
   try {
     await shim.ready
   } catch (error: unknown) {

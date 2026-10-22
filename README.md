@@ -1,14 +1,27 @@
-# DSH WorkBuddy Connect
+# DSH WorkBuddy Connect（fork：含上游限速）
 
 [English](./README.en.md) | 中文
 
-## 停止维护公告
+> **这是一个 fork。** 上游 [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 已停止维护，本仓库在此基础上**增加了上游请求限速**（详见「[限速](#限速本-fork-新增)」），其余功能与上游 0.7.9 一致。
+>
+> 上游的停止维护公告保留在下方，其判断针对的是原项目；本 fork 仅记录自己的改动，不对上游的边界判断作任何改述。
+
+## 上游停止维护公告（原文）
 
 2026 年 10 月 20 日起，WorkBuddy 开始限制非官方客户端发出的请求。单从技术角度看，这类校验不难跨越。不过，送的模型额度既然附带了使用场地要求，WorkBuddy 已明确希望区分官方客户端与第三方接入，本项目尊重这一边界，不再继续适配。使用官方 WorkBuddy 客户端当然最安全。
 
 同时，由于个人时间和精力有限，本项目即日起停止维护：不再处理新功能请求与 PR，不再提供更新、兼容性修复及问题支持。项目仓库计划于 **2026 年 10 月 22 日下线**。
 
 非常感谢大家这段时间的使用、反馈和贡献，也谢谢每一位帮忙测试、排查问题和提交 PR 的朋友。特别高兴这个小插件曾给大家带来便利！
+
+## 本 fork 的改动
+
+| 改动 | 说明 |
+|---|---|
+| 上游请求限速 | 最小请求间隔 + 并发上限 + 自适应冷却，可用一个 JSON 文件热改，见「[限速](#限速本-fork-新增)」 |
+| 测试 | 新增 `tests/rate-gate.spec.ts`、`tests/rate-limit-config.spec.ts`，共 15 个用例 |
+
+改动集中在 `src/rate-gate.ts`（新增）、`src/rate-limit-config.ts`（新增），以及 `src/shim.ts`、`src/index.ts` 的接入。
 
 ---
 
@@ -121,6 +134,56 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 ```
 
 `logout` 只删除该版插件自留的凭据副本，不动桌面 App 自己的登录，也不承诺一定让模型分组消失（App 的凭据文件仍在时依然生效）。
+
+## 限速（本 fork 新增）
+
+上游返回的 429 里，绝大多数不是「你的账号被限流」，而是 `模型繁忙，请换模型或稍后重试`——上游算力排队。这类限流与账号无关，**换账号解决不了，加大重试只会更糟**：DSH 默认在约 15.5 秒内重试 5 次，等于把一次拒绝放大成六次。
+
+本 fork 在 shim 的唯一上游出口加了一道闸门，用三个互相独立的控制把请求密度压下来：
+
+| 控制 | 默认 | 作用 |
+|---|---|---|
+| `minIntervalMs` | 1200 | 两次上游请求的**最小起始间隔**，另加随机抖动 |
+| `maxConcurrent` | 2 | 同时打开的上游流上限；子代理并发是突发主因 |
+| 自适应冷却 | 5 s 起，翻倍，封顶 120 s | 上游说繁忙就退避，一次成功即清零 |
+
+### 怎么改：编辑一个 JSON 文件
+
+首次启动会自动生成，之后**永远不会被覆盖**（升级插件也不会丢）：
+
+```
+~/.dsh/.workbuddy-rate-limit.json
+```
+
+```json
+{
+  "enabled": true,
+  "minIntervalMs": 1200,
+  "jitterMs": 400,
+  "maxConcurrent": 2,
+  "cooldownBaseMs": 5000,
+  "cooldownMaxMs": 120000
+}
+```
+
+- **改完保存即生效，下一次请求就按新值执行，不需要重启 DSH。** 文件按 mtime + size 检测变化，没变就不重新解析。
+- `enabled: false` 完全关闭限速，同样即时生效。
+- 以 `//` 开头的键是说明文字，会被忽略（JSON 本身不支持注释，所以用这种写法）。
+- **写坏了不会出事**：JSON 语法错误、把数字写成字符串、填负数，都会**逐字段回退到默认值**并记一条警告。一个手误既不会悄悄关掉限速，也不会让模型不可用。
+
+常用调整：嫌慢就把 `minIntervalMs` 调到 `800`；还是撞繁忙就把 `maxConcurrent` 调到 `1`；想临时全关就 `enabled: false`。
+
+### 环境变量（可选）
+
+不建配置文件时，也可以用环境变量配置，`DSH_WORKBUDDY_RATE_LIMIT=0` 可直接关闭：
+
+`DSH_WORKBUDDY_MIN_INTERVAL_MS`、`DSH_WORKBUDDY_RATE_JITTER_MS`、`DSH_WORKBUDDY_MAX_CONCURRENT`、`DSH_WORKBUDDY_COOLDOWN_BASE_MS`、`DSH_WORKBUDDY_COOLDOWN_MAX_MS`。
+
+优先级：**配置文件 > 环境变量 > 内置默认值**。文件存在时它就是唯一来源。
+
+### 与重试策略的关系
+
+限速和重试解决的是两件事：限速**减少**撞墙，重试负责撞墙后**恢复**。两者不冲突，可以同时配。
 
 ## 配置
 

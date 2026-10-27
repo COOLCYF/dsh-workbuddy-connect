@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | 中文
 
-> **这是一个 fork。** 上游 [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 已停止维护，本仓库在此基础上**增加了上游请求限速**（详见「[限速](#限速本-fork-新增)」），其余功能与上游 0.7.9 一致。
+> **这是一个 fork。** 上游 [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 已停止维护，本仓库在此基础上**增加了上游请求限速**（详见「[限速](#限速本-fork-新增)」），并**适配 DSH `0.2.1-rc.3`、放开内核版本上限**；其余功能与上游 0.7.9 一致。
 >
 > 上游的停止维护公告保留在下方，其判断针对的是原项目；本 fork 仅记录自己的改动，不对上游的边界判断作任何改述。
 
@@ -19,6 +19,7 @@
 | 改动 | 说明 |
 |---|---|
 | 上游请求限速 | 最小请求间隔 + 并发上限 + 自适应冷却，可用一个 JSON 文件热改，见「[限速](#限速本-fork-新增)」 |
+| 适配 DSH 0.2.1-rc.3 | peer 改为无上界的 `>=0.2.1-rc.2`，新内核不再被版本号挡住 |
 | 测试 | 新增 `tests/rate-gate.spec.ts`、`tests/rate-limit-config.spec.ts`，共 15 个用例 |
 
 改动集中在 `src/rate-gate.ts`（新增）、`src/rate-limit-config.ts`（新增），以及 `src/shim.ts`、`src/index.ts` 的接入。
@@ -216,20 +217,26 @@ llm-workbuddy:
 
 ## 版本兼容与历史版本
 
-插件版本必须与 DSH 内核匹配，不匹配的组合会导致 DSH 启动失败；桌面版按其内置核心选择插件版本。npm 上的最新版不一定适合你，以实际内核的匹配关系为准：
+**本 fork 从 0.8.0 起不再锁死内核上限**：六个 DSH 服务 peer 声明为 `>=0.2.1-rc.2`，没有上界，因此 DSH 发布新的 rc 补丁时不会因为版本号被直接挡住。
 
-| DSH 内核 | 推荐插件版 | 注意事项 |
+代价说清楚：**声明兼容 ≠ 已经验证**。0.8.0 在 `0.2.1-rc.3` 上验证过（类型检查、888 个用例、以及用 rc.3 的真实宿主模块跑通注册与模型目录拉取）；更远的内核版本没有验证过，可能失效。
+
+| DSH 内核 | 插件版 | 状态 |
 |---|---|---|
-| `0.2.1-rc.2` | `0.7.9` | 仅适配这一内核；`0.2.0-rc.2` 与 `0.2.1-rc.2` 不同，请核对 App 内置版本。 |
-| `0.2.1-rc.1` | `0.7.7` | 内核升级到 `@earendil-works/pi-ai` 1.3.0，插件同步自带 1.3.0，历史遗留的 0.87.1 overrides 必须移除（见下方 pi-ai 说明）。 |
-| `0.2.0-rc.2` | `0.7.6` | 上一代内核线；修复企业账号模型目录缺项与国际版对话被渠道校验拦截，勿停留在有注册表回归的 0.7.2。 |
-| `0.2.0-rc.1` | `0.7.0` | 0.7.1 起不再支持 rc.1，请停留本版。 |
-| `0.1.5` – `0.1.7` | `0.6.5` | 旧内核最终版；0.7.0 起仅面向 0.2.0。 |
+| `0.2.1-rc.3` | `0.8.0` | **已验证**：注册成功、目录可拉取、限速可用。 |
+| `0.2.1-rc.2` | `0.8.0` / `0.7.9` | 兼容（0.8.0 的 peer 下限就是它）。 |
+| `0.2.1-rc.1` | `0.7.7` | 旧版；0.8.0 的 peer 下限不含它。 |
+| `0.2.0-rc.2` | `0.7.6` | 上一代内核线，请用对应旧版。 |
+| `0.2.0-rc.1` | `0.7.0` | 旧版，请停留该线。 |
+| `0.1.5` – `0.1.7` | `0.6.5` | 旧内核最终版。 |
 | `0.1.2-rc.1` | `0.3.1` | 更早旧线，仅历史维护。 |
 | `0.1.1-rc.2` | `0.2.6` | 更早旧线，仅历史维护。 |
 
+> 升级内核后如果 WorkBuddy 分组消失，先看插件是否还在 profile 的 `dsh.profile.bundles` 里——DSH 桌面版升级有时会重写 profile。
+
 历次更新（完整记录见 [releases](https://github.com/corrinehu/dsh-workbuddy-connect/releases)）：
 
+- **0.8.0**（本 fork）：适配 DSH `0.2.1-rc.3`；peer 改为无上界的 `>=0.2.1-rc.2`；开发依赖升到 rc.3 以便本地类型检查与测试跑在目标内核上。**已在 rc.3 上验证**：`apply()` 不抛错、两个 provider 均注册、shim 正常监听、用真实凭据拉取模型目录成功、限速闸门生效。另：`version.spec.ts` 的 peer 断言改为校验「有下限、无上界」的形状。
 - **0.7.9**：恢复 DSH 0.2.1-rc.2 上国际版最大上下文窗口开关，修复延迟初始化及设置持久化（PR [#172](https://github.com/corrinehu/dsh-workbuddy-connect/pull/172)，by @1Dreamer666）；避免本地服务绑定到 fetch 禁用端口导致国际版 502（PR [#164](https://github.com/corrinehu/dsh-workbuddy-connect/pull/164)，by @Xiong-Ziyi）；同名积分包合并展示，减少重复条目。
 - **0.7.8**：适配 DSH 0.2.1-rc.2；将官方原子写入工具打包到插件，避免依赖宿主暴露该模块；更新国内模型目录快照，区分 Hy3 / Hy3-X；优化推理检测结果展示，调整积分刷新按钮位置并修正悬停提示。感谢 @chenpiyanghappy 的 PR [#156](https://github.com/corrinehu/dsh-workbuddy-connect/pull/156)。
 - **0.7.7**：适配 DSH 0.2.1-rc.1 内核：peer 收窄到 0.2.1-rc.1，插件自带的 `@earendil-works/pi-ai` 随内核升级到 1.3.0（profile 级历史遗留的 0.87.1 overrides 必须移除，否则插件无法加载）；修复国际版与国内版推理档位检测停留「检测未完成」——上游把档位拒绝码改拼为 `invalid_parameter_value`（[#143](https://github.com/corrinehu/dsh-workbuddy-connect/issues/143) / [#148](https://github.com/corrinehu/dsh-workbuddy-connect/issues/148)，PR [#145](https://github.com/corrinehu/dsh-workbuddy-connect/pull/145)）；修复中文 Windows 控制台下注册表缺键诊断因 GBK 编码被误判（zh-CN 实机验证）。

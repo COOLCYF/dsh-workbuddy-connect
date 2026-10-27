@@ -2,7 +2,7 @@
 
 English | [中文](./README.md)
 
-> **This is a fork.** The upstream [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) has been discontinued. This repository adds **upstream request rate limiting** on top of it (see [Rate limiting](#rate-limiting-new-in-this-fork)); every other feature matches upstream 0.7.9.
+> **This is a fork.** The upstream [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) has been discontinued. This repository adds **upstream request rate limiting** on top of it (see [Rate limiting](#rate-limiting-new-in-this-fork)) and **adapts to DSH `0.2.1-rc.3` with the core upper bound removed**; every other feature matches upstream 0.7.9.
 >
 > The upstream discontinuation notice is kept verbatim below. Its judgement is about the original project; this fork documents only its own changes and does not restate that judgement.
 
@@ -19,6 +19,7 @@ Many thanks to everyone who used the plugin, shared feedback, and contributed, e
 | Change | Detail |
 |---|---|
 | Upstream request rate limiting | Minimum request spacing + concurrency cap + adaptive cooldown, tunable through one hot-reloading JSON file — see [Rate limiting](#rate-limiting-new-in-this-fork) |
+| DSH 0.2.1-rc.3 support | Peers become open-ended `>=0.2.1-rc.2`, so a new core is not blocked by a version string |
 | Tests | Adds `tests/rate-gate.spec.ts` and `tests/rate-limit-config.spec.ts`, 15 cases total |
 
 The changes live in `src/rate-gate.ts` (new), `src/rate-limit-config.ts` (new), plus the wiring in `src/shim.ts` and `src/index.ts`.
@@ -213,20 +214,26 @@ llm-workbuddy:
 
 ## Compatibility and release history
 
-The plugin version must match the DSH core — a mismatched combination fails to start DSH — and the Desktop app picks its plugin version by the bundled core. The newest npm release is not necessarily right for you: match your actual core first.
+**Since 0.8.0 this fork no longer pins a core upper bound**: the six DSH service peers are declared `>=0.2.1-rc.2` with no ceiling, so a new DSH rc patch is not blocked by a version string alone.
 
-| DSH core | Recommended plugin | Notes |
+The trade-off, stated plainly: **declaring compatibility is not the same as verifying it.** 0.8.0 was verified on `0.2.1-rc.3` (typecheck, 888 tests, and a real run against the rc.3 host modules covering registration and catalog fetch). Cores beyond that are unverified and may break.
+
+| DSH core | Plugin | Status |
 |---|---|---|
-| `0.2.1-rc.2` | `0.7.9` | Targets this core only; `0.2.0-rc.2` and `0.2.1-rc.2` differ. Check the core bundled in your Desktop app. |
-| `0.2.1-rc.1` | `0.7.7` | The core moved to `@earendil-works/pi-ai` 1.3.0, so the plugin bundles 1.3.0 too — a leftover 0.87.1 overrides entry must be removed (see the pi-ai note below). |
-| `0.2.0-rc.2` | `0.7.6` | Previous core line; fixes enterprise catalog gaps and international chat requests blocked by the upstream channel check. Avoid 0.7.2 with its registry regression. |
-| `0.2.0-rc.1` | `0.7.0` | 0.7.1 drops rc.1 support; stay on this version. |
-| `0.1.5` – `0.1.7` | `0.6.5` | Final release for the old cores; 0.7.0 targets 0.2.0 only. |
+| `0.2.1-rc.3` | `0.8.0` | **Verified**: registers, fetches the catalog, rate limiting works. |
+| `0.2.1-rc.2` | `0.8.0` / `0.7.9` | Compatible — it is 0.8.0's peer floor. |
+| `0.2.1-rc.1` | `0.7.7` | Older; below 0.8.0's peer floor. |
+| `0.2.0-rc.2` | `0.7.6` | Previous core line; use the matching older release. |
+| `0.2.0-rc.1` | `0.7.0` | Older; stay on that line. |
+| `0.1.5` – `0.1.7` | `0.6.5` | Final release for the old cores. |
 | `0.1.2-rc.1` | `0.3.1` | Older line, historical maintenance only. |
 | `0.1.1-rc.2` | `0.2.6` | Older line, historical maintenance only. |
 
+> If the WorkBuddy group disappears after a core upgrade, first check that the plugin is still in the profile's `dsh.profile.bundles` — Desktop upgrades sometimes rewrite the profile.
+
 Release history (full records at [releases](https://github.com/corrinehu/dsh-workbuddy-connect/releases)):
 
+- **0.8.0** (this fork): adapts to DSH `0.2.1-rc.3`; peers become open-ended `>=0.2.1-rc.2`; dev dependencies move to rc.3 so typecheck and tests run against the target core. **Verified on rc.3**: `apply()` does not throw, both providers register, the shim listens, the catalog fetches with real credentials, and the rate gate engages. `version.spec.ts` now asserts the peer *shape* (a floor, no ceiling).
 - **0.7.9**: restores the international edition's maximum-context switch on DSH 0.2.1-rc.2, including delayed initialization and persistent settings (PR [#172](https://github.com/corrinehu/dsh-workbuddy-connect/pull/172), by @1Dreamer666); avoids fetch-blocked local ports that could cause international-edition 502 errors (PR [#164](https://github.com/corrinehu/dsh-workbuddy-connect/pull/164), by @Xiong-Ziyi); combines credit packages with the same name to reduce repeated entries.
 - **0.7.8**: adapts to DSH 0.2.1-rc.2; bundles the official atomic-write helper instead of relying on host module exposure; refreshes the China catalog snapshot and distinguishes Hy3 / Hy3-X; improves probe result labels and fixes the credit-refresh placement and tooltip. Thanks to @chenpiyanghappy for PR [#156](https://github.com/corrinehu/dsh-workbuddy-connect/pull/156).
 - **0.7.7**: adapts to the DSH 0.2.1-rc.1 core: peers narrow to 0.2.1-rc.1 and the plugin-bundled `@earendil-works/pi-ai` moves to 1.3.0 with it (a profile-level leftover 0.87.1 overrides entry must be removed, or the plugin fails to load).

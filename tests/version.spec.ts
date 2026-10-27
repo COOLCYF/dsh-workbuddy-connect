@@ -66,24 +66,21 @@ describe('peer manifest pins the verified DSH cores', () => {
   /**
    * #69's lesson: a caret on a prerelease arm (`^0.2.0-rc.1`) silently
    * admits every later rc of the same tuple — semver auto-extends support
-   * nobody verified. Since 0.7.0 the seven DSH service peers are pinned to
-   * exactly the cores this release was smoke-tested on; extending support
-   * means editing this list after a real run, not letting a caret do it.
-   * Since 0.7.7 the list was 0.2.1-rc.1 alone: 0.2.0-rc.2 cannot be
-   * smoke-tested anymore alongside it, and an untested arm is support
-   * nobody verified. This candidate targets 0.2.1-rc.2 and bundles the
-   * official atomic-write helper. Local checks do not replace Desktop
-   * acceptance testing.
+   * nobody verified. Up to 0.7.9 the seven DSH service peers were therefore
+   * pinned to exactly one core.
    *
-   * #74's lesson on top of it: pi-ai must NOT be a dual-arm range. An
-   * in-place upgrade from a 0.6.x-era pnpm profile keeps satisfying
-   * `^0.85.1 || ^0.87.1` with the old 0.85.1 install, reproducing #69's
-   * two-generation mixing against an rc.2 host that ships 0.87.1.
+   * Since 0.8.0 that changes deliberately, in the opposite direction: the
+   * peers are open-ended lower bounds (`>=0.2.1-rc.2`) with **no upper bound**,
+   * so a DSH point release such as 0.2.1-rc.3 does not lock the plugin out
+   * before anyone can try it. The trade-off is explicit and accepted: an
+   * untested future core may break the plugin, and this file can no longer
+   * prove otherwise. What it *can* still prove is the shape of the claim —
+   * a floor, and no ceiling smuggled in via `^`, `<`, or `||`.
    *
-   * #92 extended that lesson one step further: even the caret-free `^0.87.1`
-   * peer range was not enough, because a peer is only a claim about what the
-   * *installer* should provide. pi-ai is therefore a pinned regular
-   * dependency now; the assertion below pins that shape.
+   * #92 and #74's lessons stand unchanged: pi-ai is a pinned regular
+   * dependency (never a peer), because a hoisted profile with
+   * `autoInstallPeers: false` lets another plugin's older copy win
+   * bare-specifier resolution.
    */
   const DSH_SERVICE_PEERS = [
     '@deepseek-ai/dsh-attachment',
@@ -94,12 +91,21 @@ describe('peer manifest pins the verified DSH cores', () => {
     '@deepseek-ai/dsh-settings',
   ] as const
 
-  it('each DSH service peer is an exact, caret-free list of verified cores', () => {
+  /** The oldest core this build is meant to serve. */
+  const PEER_FLOOR = '>=0.2.1-rc.2'
+
+  it('each DSH service peer is an open-ended floor with no upper bound', () => {
     const pkg = JSON.parse(
       readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
     ) as { peerDependencies: Record<string, string> }
     for (const name of DSH_SERVICE_PEERS) {
-      expect(pkg.peerDependencies[name], `${name} missing from peerDependencies`).toBe('0.2.1-rc.2')
+      const range = pkg.peerDependencies[name]
+      expect(range, `${name} missing from peerDependencies`).toBe(PEER_FLOOR)
+      // Guard the shape: a caret, a `<`, or a `||` arm would quietly reinstate
+      // the ceiling this change exists to remove.
+      expect(range, `${name} must not carry a caret`).not.toContain('^')
+      expect(range, `${name} must not carry an upper bound`).not.toContain('<')
+      expect(range, `${name} must not carry a disjunction`).not.toContain('||')
     }
   })
 
@@ -109,7 +115,8 @@ describe('peer manifest pins the verified DSH cores', () => {
     const pkg = JSON.parse(
       readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
     ) as { peerDependencies: Record<string, string>, devDependencies: Record<string, string> }
-    expect(pkg.devDependencies['@deepseek-ai/dsh-atomic-write']).toBe('0.2.1-rc.2')
+    // Pinned to the core the local suite runs against (0.2.1-rc.3).
+    expect(pkg.devDependencies['@deepseek-ai/dsh-atomic-write']).toBe('0.2.1-rc.3')
     expect(pkg.peerDependencies['@deepseek-ai/dsh-atomic-write']).toBeUndefined()
   })
 
